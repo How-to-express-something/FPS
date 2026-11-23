@@ -1,0 +1,26 @@
+# Unreal output and local state
+**/Binaries/
+**/Intermediate/
+**/Saved/
+**/DerivedDataCache/
+**/.vs/
+**/.idea/
+**/__pycache__/
+**/.claude/
+**/node_modules/
+*.sln
+*.suo
+*.vcxproj*
+*.user
+*.tmp
+*.bak
+.env*
+Tools/LocalBuildConfig.json
+Config/DefaultEditorPerProjectUserSettings.ini
+# Personal study and application materials stay local
+Source/Docs/
+**/*简历*
+**/*证件照*
+# Third-party and template asset packs are not part of this public snapshot
+/Content/*
+!/Content/FPS/
