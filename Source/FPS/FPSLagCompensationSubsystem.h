@@ -28,6 +28,7 @@ public:
 	static UFPSLagCompensationSubsystem* Get(const UObject* WorldContextObject);
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
@@ -55,8 +56,11 @@ public:
 	void DrawHistory(int32 FramesBack) const;
 
 	bool IsServer() const { return bIsServer; }
+	const TArray<FPSLagComp::FShotDebugSnapshot>& GetShotDebugSnapshots() const { return ShotDebugSnapshots; }
 
 private:
+	void DrawShotSnapshots();
+	mutable TArray<FPSLagComp::FShotDebugSnapshot> ShotDebugSnapshots;
 	struct FCharacterHistory
 	{
 		TStaticArray<FPSLagComp::FSampleFrame, FPSLagComp::HistoryFrameCount> Frames;
@@ -75,5 +79,6 @@ private:
 	bool bIsServer = false;
 #if WITH_DEV_AUTOMATION_TESTS
 	friend struct FFPSLifeHistoryTestAccess;
+	friend struct FFPSNetworkDiagnosticsTestAccess;
 #endif
 };

@@ -8,6 +8,7 @@
 #include "FPSWeaponAimTypes.h"
 #include "FPSRecoil.h"
 #include "FPSAnimationPresentation.h"
+#include "FPSNetworkDiagnostics.h"
 #include "FPSCombatComponent.generated.h"
 
 class AFPSWeapon;
@@ -134,6 +135,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	int32 GetDisplayAmmo() const;
 
+	/** Reads current state plus the most recent real receipt; never drives gameplay. */
+	UFUNCTION(BlueprintPure, Category = "Combat|Diagnostics")
+	FString GetNetworkDiagnosticsText() const;
+	const FFPSNetworkDiagnostics& GetNetworkDiagnostics() const { return NetworkDiagnostics; }
+
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsReloading() const { return bReloading; }
 
@@ -157,6 +163,7 @@ public:
 	void AttachWeaponToOwner(AFPSWeapon* Weapon);
 
 protected:
+	FFPSNetworkDiagnostics NetworkDiagnostics;
 	void PresentHitConfirmation(const FFPSShotResult& Result);
 	double LastBodyHitSoundTime = -1.;
 	/** Per-weapon-type anims, attach sockets, and montages. */
@@ -396,5 +403,6 @@ protected:
 	friend struct FFPSAnimationTestAccess;
 	friend struct FFPSDeathPresentationTestAccess;
 	friend struct FFPSDamageWidgetTestAccess;
+	friend struct FFPSNetworkDiagnosticsTestAccess;
 #endif
 };

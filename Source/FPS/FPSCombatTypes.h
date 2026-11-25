@@ -177,6 +177,14 @@ struct FFPSShotResult
 	UPROPERTY()
 	int32 ResolvedFrame = 0;
 
+	/** Diagnostic metadata from the actual server query. No target transforms replicate. */
+	UPROPERTY() int32 RequestedFrame = INDEX_NONE;
+	UPROPERTY() int32 NewestHistoryFrame = INDEX_NONE;
+	/** Actual pose frame of the hit target; INDEX_NONE for miss/world/current fallback. */
+	UPROPERTY() int32 HitSampleFrame = INDEX_NONE;
+	UPROPERTY() bool bUsedHistory = false;
+	UPROPERTY() bool bQueryPerformed = false;
+
 	UPROPERTY()
 	FVector HitLocation = FVector::ZeroVector;
 

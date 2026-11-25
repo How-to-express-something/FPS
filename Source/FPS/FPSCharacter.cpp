@@ -8,6 +8,7 @@
 #include "FPSAimAlignment.h"
 #include "FPSCombatComponent.h"
 #include "FPSGameMode.h"
+#include "FPSRecordingTestGameMode.h"
 #include "FPSHealthComponent.h"
 #include "FPSHitReactionComponent.h"
 #include "Animation/AnimInstance.h"
@@ -185,6 +186,7 @@ void AFPSCharacter::PostInitializeComponents()
 void AFPSCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+	RefreshRecordingPresentation();
 	if (GetNetMode() != NM_DedicatedServer && GetMesh())
 	{
 		PoseReadyHandle = GetMesh()->RegisterOnBoneTransformsFinalizedDelegate(
@@ -245,6 +247,15 @@ void AFPSCharacter::BeginPlay()
 			LagComp->RegisterCharacter(this);
 		}
 	}
+}
+
+void AFPSCharacter::RefreshRecordingPresentation()
+{
+	// One-way suppression for this observer life. Death cleanup must never be undone.
+	if (bCharacterEndingPlay || !AFPSRecordingTestGameMode::IsListenHostObserver(this)) return;
+	if (GetMesh1P()) GetMesh1P()->SetHiddenInGame(true);
+	if (AFPSWeapon* Weapon = CombatComponent ? CombatComponent->GetCurrentWeapon() : nullptr)
+		if (Weapon->GetWeaponMesh1P()) Weapon->GetWeaponMesh1P()->SetHiddenInGame(true);
 }
 
 void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -658,6 +669,7 @@ void AFPSCharacter::ResetAimState()
 void AFPSCharacter::NotifyControllerChanged()
 {
 	Super::NotifyControllerChanged();
+	RefreshRecordingPresentation();
 
 	// Unpossessed: restore the cosmetic ADS offset and FOV.
 	if (!Controller)

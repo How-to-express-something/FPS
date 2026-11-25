@@ -20,6 +20,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
+#include "Engine/NetDriver.h"
 #include "EngineUtils.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
@@ -39,6 +40,8 @@ namespace
 		TEXT("1 logs each local prediction, server verdict and owning-client acknowledgement."), ECVF_Default);
 	TAutoConsoleVariable<int32> CVarNetTracePhase(TEXT("fps.Net.Phase"), 0,
 		TEXT("Local diagnostic stage label (e.g. 1=baseline, 2=lag, 3=recovery)."), ECVF_Default);
+	TAutoConsoleVariable<int32> CVarPredictedRay(TEXT("fps.Net.DrawPredicted"), 0,
+		TEXT("1 draws this local shooter's real predicted ray (cyan); non-shipping only."), ECVF_Cheat);
 
 	FString NetTraceContext(const UFPSCombatComponent* Combat)
 	{
@@ -146,6 +149,7 @@ void UFPSCombatComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Inventory.Reset();
 	PendingShots.Reset();
 
+	NetworkDiagnostics = FFPSNetworkDiagnostics();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -1099,6 +1103,19 @@ void UFPSCombatComponent::FireOnce()
 	}
 #endif
 
+	++NetworkDiagnostics.PredictedCount;
+	NetworkDiagnostics.LastPredictedSequence = Prediction.Sequence;
+	NetworkDiagnostics.LastPredictedIndex = Prediction.BurstShotIndex;
+	NetworkDiagnostics.LastRequestFrame = Request.ClientFrame;
+	NetworkDiagnostics.AddEvent(FString::Printf(TEXT("PREDICT seq=%d b=%u i=%d ammo=%d pending=%d"),
+		Request.Sequence, Request.BurstId, Prediction.BurstShotIndex, GetDisplayAmmo(), PendingShots.Num()));
+#if ENABLE_DRAW_DEBUG && !UE_BUILD_SHIPPING
+	if (CVarPredictedRay.GetValueOnGameThread() > 0)
+	{
+		DrawDebugLine(World, Start, Prediction.HitLocation, FColor::Cyan, false, 1.5f, 0, 1.f);
+		DrawDebugPoint(World, Prediction.HitLocation, 8.f, FColor::Cyan, false, 1.5f);
+	}
+#endif
 	Server_FireShot(Request);
 	if (PredictedAmmo <= 0 && !bReloading) Reload();
 	ScheduleNextShot();
@@ -1292,6 +1309,7 @@ void UFPSCombatComponent::Server_FireShot_Implementation(const FFPSShotRequest& 
 	Result.BurstId = Request.BurstId;
 	Result.NextShotIndex = ServerNextBurstShotIndex;
 	Result.ResolvedFrame = Request.ClientFrame;
+	Result.RequestedFrame = Request.ClientFrame;
 	Result.RemainingAmmo = CurrentWeapon ? CurrentWeapon->GetAmmoInMag() : 0;
 	Result.AmmoRevision = CurrentWeapon ? CurrentWeapon->GetAmmoRevision() : 0;
 
@@ -1459,6 +1477,10 @@ void UFPSCombatComponent::Server_FireShot_Implementation(const FFPSShotRequest& 
 	Result.AmmoRevision = Weapon->GetAmmoRevision();
 	Result.ResolvedFrame = bResolved ? Resolved.ResolvedFrame : Request.ClientFrame;
 	Result.bFrameClamped = bResolved && Resolved.bFrameClamped;
+	Result.NewestHistoryFrame = LagComp ? LagComp->GetNewestRecordedFrame() : INDEX_NONE;
+	Result.HitSampleFrame = bResolved ? Resolved.HitSampleFrame : INDEX_NONE;
+	Result.bUsedHistory = bResolved && Resolved.bHaveHistory;
+	Result.bQueryPerformed = bResolved;
 
 	// Shot FX for everyone else.
 	FFPSShotFX FX;
@@ -1559,10 +1581,13 @@ void UFPSCombatComponent::Server_FireShot_Implementation(const FFPSShotRequest& 
 
 void UFPSCombatComponent::Client_ShotResult_Implementation(const FFPSShotResult& Result)
 {
+	if (bEndingPlay) return;
 	FFPSPredictedShot* Predicted = PendingShots.Find(Result.Sequence);
 	// Old weapon / already cleared predictions must not change current ammo or recoil.
 	if (!Predicted)
 	{
+		++NetworkDiagnostics.IgnoredCount;
+		NetworkDiagnostics.AddEvent(FString::Printf(TEXT("IGNORED seq=%d burst=%u noPendingPrediction"), Result.Sequence, Result.BurstId));
 		if (CVarNetTrace.GetValueOnGameThread() > 0)
 			UE_LOG(LogFPSCombat, Log, TEXT("[FPSNet][AckIgnored] %s seq=%d burst=%u reason=noPendingPrediction"),
 				*NetTraceContext(this), Result.Sequence, Result.BurstId);
@@ -1592,6 +1617,8 @@ void UFPSCombatComponent::Client_ShotResult_Implementation(const FFPSShotResult&
 	PendingShots.Remove(Result.Sequence);
 	if (!bContextMatches || CurrentWeapon != Result.Weapon)
 	{
+		++NetworkDiagnostics.IgnoredCount;
+		NetworkDiagnostics.AddEvent(FString::Printf(TEXT("IGNORED seq=%d burst=%u changedContext"), Result.Sequence, Result.BurstId));
 		if (CVarNetTrace.GetValueOnGameThread() > 0)
 			UE_LOG(LogFPSCombat, Log, TEXT("[FPSNet][AckIgnored] %s seq=%d burst=%u reason=changedContext ackMs=%.2f"),
 				*NetTraceContext(this), Result.Sequence, Result.BurstId, AckMs);
@@ -1608,8 +1635,32 @@ void UFPSCombatComponent::Client_ShotResult_Implementation(const FFPSShotResult&
 			if (Pair.Value.BurstId == Result.BurstId) ++PendingForBurst;
 		}
 	}
+	// Value copies only: no diagnostic broadcast can re-enter gameplay here.
+	NetworkDiagnostics.bHasReceipt = true;
+	NetworkDiagnostics.LastAckSequence = Result.Sequence;
+	NetworkDiagnostics.LastAckBurst = Result.BurstId;
+	NetworkDiagnostics.LastServerIndex = Result.ServerShotIndex;
+	NetworkDiagnostics.LastServerAmmo = Result.RemainingAmmo;
+	NetworkDiagnostics.AckMilliseconds = AckMs;
+	NetworkDiagnostics.RequestedFrame = Result.RequestedFrame;
+	NetworkDiagnostics.ResolvedFrame = Result.ResolvedFrame;
+	NetworkDiagnostics.SampleFrame = Result.HitSampleFrame;
+	NetworkDiagnostics.NewestFrame = Result.NewestHistoryFrame;
+	NetworkDiagnostics.bHasHistory = Result.bUsedHistory;
+	NetworkDiagnostics.bQueryPerformed = Result.bQueryPerformed;
+	NetworkDiagnostics.bFrameClamped = Result.bFrameClamped;
+	NetworkDiagnostics.bOffsetsAgree = bOffsetsAgree;
+	NetworkDiagnostics.bHitAgrees = bHitAgrees;
+	NetworkDiagnostics.RejectReason = Result.RejectReason;
+	NetworkDiagnostics.Outcome = Result.Outcome;
+	NetworkDiagnostics.ActualDamage = Result.ActualDamage;
+	if (bAccepted) ++NetworkDiagnostics.AcceptedCount; else ++NetworkDiagnostics.RejectedCount;
+	if (!bAccepted || !bOffsetsAgree || !bHitAgrees) ++NetworkDiagnostics.CorrectedCount;
 	PredictedAmmo = FMath::Max(Result.RemainingAmmo - PendingForWeapon, 0);
 	AcceptAmmoBaseline(Result.RemainingAmmo, Result.AmmoRevision);
+	NetworkDiagnostics.AddEvent(FString::Printf(TEXT("%s seq=%d b=%u %s ammo=%d>%d pending=%d %.1fms"),
+		bAccepted ? TEXT("ACK") : TEXT("REJECT"), Result.Sequence, Result.BurstId,
+		*StaticEnum<EFPSShotReject>()->GetNameStringByValue(int64(Result.RejectReason)), DisplayBefore, GetDisplayAmmo(), PendingShots.Num(), AckMs));
 	NotifyDisplayAmmoChanged();
 	if (CVarNetTrace.GetValueOnGameThread() > 0)
 	{
@@ -1642,6 +1693,48 @@ void UFPSCombatComponent::Client_ShotResult_Implementation(const FFPSShotResult&
 	}
 	ScheduleNextShot();
 	if (bAccepted) PresentHitConfirmation(Result);
+}
+
+FString UFPSCombatComponent::GetNetworkDiagnosticsText() const
+{
+	const FFPSNetworkDiagnostics& D = NetworkDiagnostics;
+	const UWorld* World = GetWorld();
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerState* PS = Pawn ? Pawn->GetPlayerState() : nullptr;
+	const TCHAR* Mode = !World ? TEXT("NoWorld") : World->GetNetMode() == NM_Client ? TEXT("Client") :
+		World->GetNetMode() == NM_ListenServer ? TEXT("ListenServer") : World->GetNetMode() == NM_DedicatedServer ? TEXT("DedicatedServer") : TEXT("Standalone");
+	FString Text = FString::Printf(TEXT("FPS NETWORK | %s | authority=%d | phase=%d\nWorld: %s | Pawn: %s | Player: %s\nWeapon: %s | ammo(display)=%d | pending=%d | nextIndex=%d\nPredicted seq=%d index=%d requestFrame=%d | reload=%d\nThis life: predicted=%d accepted=%d rejected=%d corrected=%d ignored=%d\n"),
+		Mode, GetOwner() && GetOwner()->HasAuthority(), CVarNetTracePhase.GetValueOnGameThread(),
+		*GetNameSafe(World), *GetNameSafe(GetOwner()), PS ? *PS->GetPlayerName() : TEXT("pending"),
+		*GetNameSafe(CurrentWeapon), GetDisplayAmmo(), PendingShots.Num(), NextLocalBurstShotIndex,
+		D.LastPredictedSequence, D.LastPredictedIndex, D.LastRequestFrame, bReloading,
+		D.PredictedCount, D.AcceptedCount, D.RejectedCount, D.CorrectedCount, D.IgnoredCount);
+	if (!D.bHasReceipt) Text += TEXT("ACK: waiting (no server receipt for this life)\n");
+	else
+	{
+		const double RewindMs = D.bHasHistory && D.NewestFrame >= 0 ?
+			(D.NewestFrame - D.ResolvedFrame) * (1000. / FPSLagComp::ServerFrameRate) : -1.;
+		Text += FString::Printf(TEXT("LAST ACK seq=%d burst=%u serverIndex=%d ammo(at ACK)=%d\nAck round-trip=%.1fms | outcome=%s damage=%.1f | reject=%s\nOffset match=%d | hit match=%d | history=%d clamped=%d\nFrames request=%d resolved=%d hitSample=%d newest=%d | query rewind=%.1fms\n"),
+			D.LastAckSequence, D.LastAckBurst, D.LastServerIndex, D.LastServerAmmo, D.AckMilliseconds,
+			*UEnum::GetValueAsString(D.Outcome), D.ActualDamage, *UEnum::GetValueAsString(D.RejectReason),
+			D.bOffsetsAgree, D.bHitAgrees, D.bHasHistory, D.bFrameClamped,
+			D.RequestedFrame, D.bQueryPerformed ? D.ResolvedFrame : INDEX_NONE, D.SampleFrame, D.NewestFrame, RewindMs);
+		if (!D.bQueryPerformed) Text += TEXT("Query not performed (-1 = unavailable); rejection has no history snapshot.\n");
+	}
+	Text += FString::Printf(TEXT("PlayerState ping estimate=%.1fms\n"), PS ? PS->GetPingInMilliseconds() : -1.f);
+#if DO_ENABLE_NET_TEST
+	if (const UNetDriver* Driver = World ? World->GetNetDriver() : nullptr)
+	{
+		const FPacketSimulationSettings& S = Driver->PacketSimulationSettings;
+		Text += FString::Printf(TEXT("LOCAL NetDriver config: outLag=%d +/- %dms range=%d..%dms\nInLag=%d..%dms outLoss=%d%% inLoss=%d%% order=%d dup=%d%%\n"),
+			S.PktLag, S.PktLagVariance, S.PktLagMin, S.PktLagMax, S.PktIncomingLagMin, S.PktIncomingLagMax,
+			S.PktLoss, S.PktIncomingLoss, S.PktOrder, S.PktDup);
+	}
+	else Text += TEXT("LOCAL NetDriver config: unavailable (no network driver)\n");
+#endif
+	Text += TEXT("Events: local monotonic seconds (not a cross-process clock)\n");
+	for (const FString& Event : D.Events) Text += Event + TEXT("\n");
+	return Text;
 }
 
 void UFPSCombatComponent::PresentHitConfirmation(const FFPSShotResult& Result)

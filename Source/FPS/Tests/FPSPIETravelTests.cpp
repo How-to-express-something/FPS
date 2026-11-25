@@ -279,6 +279,13 @@ private:
 			AFPSCharacter* NewPawn = ServerVictim ? Cast<AFPSCharacter>(ServerVictim->GetPawn()) : nullptr;
 			AFPSWeapon* Weapon = NewPawn ? NewPawn->GetCombatComponent()->GetCurrentWeapon() : nullptr;
 			if (!Weapon || Weapon->GetAmmoInMag() != ExpectedServerAmmo) return false;
+			AFPSCharacter* ClientPawn = ClientVictim ? Cast<AFPSCharacter>(ClientVictim->GetPawn()) : nullptr;
+			if (!ClientPawn || !ClientPawn->GetCombatComponent()->GetNetworkDiagnostics().bHasReceipt) return false;
+			const FFPSNetworkDiagnostics& Diagnostic = ClientPawn->GetCombatComponent()->GetNetworkDiagnostics();
+			Test->TestEqual(TEXT("Remote receipt reached diagnostic consumer once"), Diagnostic.AcceptedCount, 1);
+			Test->TestTrue(TEXT("Query-performed flag survived real Client RPC"), Diagnostic.bQueryPerformed);
+			Test->TestTrue(TEXT("Actual history metadata survived real Client RPC"), Diagnostic.bHasHistory && Diagnostic.NewestFrame >= 0 && Diagnostic.RequestedFrame >= 0);
+			Test->TestEqual(TEXT("Remote ammo-at-ACK equals authoritative shot snapshot"), Diagnostic.LastServerAmmo, ExpectedServerAmmo);
 			Test->TestFalse(TEXT("Remote client's real StartFire RPC removes authoritative spawn protection"), NewPawn->IsSpawnProtected());
 			Test->AddInfo(TEXT("[FPSPIE] Remote client predicted a real shot; server accepted and consumed one round."));
 			// Seed 38 prior kills to exercise the real default 40-kill threshold in a short test.

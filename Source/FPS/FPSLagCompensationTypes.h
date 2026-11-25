@@ -83,9 +83,38 @@ namespace FPSLagComp
 		int32 ResolvedFrame = 0;
 		bool bFrameClamped = false;
 		bool bHaveHistory = false;
+		int32 HitSampleFrame = INDEX_NONE;
 	};
 
 	/** Server time (seconds) to the fixed-rate frame number. */
+	/** Immutable diagnostic geometry: independent of actor lifetime and mutable history slots. */
+	struct FShotDebugTarget
+	{
+		FString Identity;
+		int32 BirthFrame = 0;
+		bool bHistorical = false;
+		FSampleFrame QueryPose;
+		FSampleFrame CurrentPose;
+	};
+	struct FShotDebugSnapshot
+	{
+		FString ShooterIdentity;
+		int32 Sequence = 0;
+		uint32 BurstId = 0;
+		int32 RequestedFrame = INDEX_NONE;
+		int32 ResolvedFrame = INDEX_NONE;
+		int32 NewestFrame = INDEX_NONE;
+		bool bClamped = false;
+		bool bHit = false;
+		bool bWorldHit = false;
+		FName HitBone;
+		FVector Start = FVector::ZeroVector;
+		FVector End = FVector::ZeroVector;
+		double ExpiresAt = 0.;
+		int32 OmittedTargets = 0;
+		TArray<FShotDebugTarget> Targets;
+	};
+
 	FPS_API int32 TimeToFrame(double ServerTime);
 
 	/** Inverse of TimeToFrame, for debug output. */

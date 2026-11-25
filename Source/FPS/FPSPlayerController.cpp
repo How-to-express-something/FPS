@@ -16,10 +16,16 @@
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/IConsoleManager.h"
+#include "UI/NetworkDiagnosticsWidget.h"
+
+static TAutoConsoleVariable<int32> CVarNetPanel(TEXT("fps.Net.Panel"), 0,
+	TEXT("1 shows a passive local-player prediction/authority panel; non-shipping only."), ECVF_Cheat);
 
 AFPSPlayerController::AFPSPlayerController()
 {
 	HUDWidgetClass = UHUDWidget::StaticClass();
+	NetworkDiagnosticsWidgetClass = UNetworkDiagnosticsWidget::StaticClass();
 }
 
 void AFPSPlayerController::SetPawn(APawn* InPawn)
@@ -64,6 +70,10 @@ void AFPSPlayerController::BeginPlay()
 
 void AFPSPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bEndingPlay = true;
+	if (NetworkDiagnosticsWidget) NetworkDiagnosticsWidget->RemoveFromParent();
+	NetworkDiagnosticsWidget = nullptr;
+	NetworkDiagnosticsWorld.Reset();
 	ClearDeathCamera();
 	if (HUDWidget)
 	{
@@ -72,6 +82,31 @@ void AFPSPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		HUDWidget = nullptr;
 	}
 	Super::EndPlay(EndPlayReason);
+}
+
+void AFPSPlayerController::UpdateNetworkDiagnostics()
+{
+#if !UE_BUILD_SHIPPING
+	if (NetworkDiagnosticsWidget && (NetworkDiagnosticsWorld.Get() != GetWorld() || bEndingPlay ||
+		!IsLocalController() || CVarNetPanel.GetValueOnGameThread() <= 0))
+	{
+		NetworkDiagnosticsWidget->RemoveFromParent();
+		NetworkDiagnosticsWidget = nullptr;
+		NetworkDiagnosticsWorld.Reset();
+	}
+	if (!bEndingPlay && IsLocalController() && GetLocalPlayer() && GetWorld() &&
+		CVarNetPanel.GetValueOnGameThread() > 0 && !NetworkDiagnosticsWidget && NetworkDiagnosticsWidgetClass)
+	{
+		NetworkDiagnosticsWidget = CreateWidget<UNetworkDiagnosticsWidget>(this, NetworkDiagnosticsWidgetClass);
+		if (NetworkDiagnosticsWidget)
+		{
+			NetworkDiagnosticsWorld = GetWorld();
+			NetworkDiagnosticsWidget->AddToPlayerScreen(100);
+			NetworkDiagnosticsWidget->SetDesiredSizeInViewport(FVector2D(650.f, 470.f));
+			NetworkDiagnosticsWidget->SetPositionInViewport(FVector2D(16.f, 100.f), false);
+		}
+	}
+#endif
 }
 
 void AFPSPlayerController::Client_BeginDeathCamera_Implementation(AFPSCharacter* DeadPawn)
@@ -109,6 +144,7 @@ void AFPSPlayerController::AutoManageActiveCameraTarget(AActor* SuggestedTarget)
 void AFPSPlayerController::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	UpdateNetworkDiagnostics();
 	if (!IsLocalController() || !DeathCamera) return;
 	const double Now = FPlatformTime::Seconds();
 	if (!bHoldingDeathCamera)

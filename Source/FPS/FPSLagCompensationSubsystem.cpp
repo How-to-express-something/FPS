@@ -5,6 +5,7 @@
 
 #include "FPS.h"
 #include "FPSCharacter.h"
+#include "FPSRecordingTestGameMode.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -31,6 +32,20 @@ static TAutoConsoleVariable<float> CVarLagCompInterpDelay(
 	TEXT("FPS.LagComp.InterpDelay"), 0.05f,
 	TEXT("Extra seconds to subtract from the estimated client render time."),
 	ECVF_Cheat);
+
+static TAutoConsoleVariable<int32> CVarDrawShots(TEXT("fps.Net.DrawShots"), 0,
+	TEXT("1 = latest server query; 2 = last 8. Yellow=ray, green=query pose, magenta=current pose. Non-shipping."), ECVF_Cheat);
+static TAutoConsoleVariable<float> CVarShotSeconds(TEXT("fps.Net.ShotSeconds"), 2.f,
+	TEXT("Per-shot snapshot lifetime, clamped to 0.1..10 seconds; at most 8 shots / 32 target poses each."), ECVF_Cheat);
+
+void UFPSLagCompensationSubsystem::Deinitialize()
+{
+	ShotDebugSnapshots.Reset();
+	Histories.Reset();
+	NewestRecordedFrame = LastRecordedFrame = INDEX_NONE;
+	bIsServer = false;
+	Super::Deinitialize();
+}
 
 UFPSLagCompensationSubsystem* UFPSLagCompensationSubsystem::Get(const UObject* WorldContextObject)
 {
@@ -82,6 +97,7 @@ void UFPSLagCompensationSubsystem::Tick(float DeltaTime)
 	}
 
 	const int32 TargetFrame = FPSLagComp::TimeToFrame(World->GetTimeSeconds());
+	DrawShotSnapshots();
 
 	// A server tick can cover more than one 60 Hz frame (default net tick rate
 	// is 30). Fill the skipped frame numbers with the same sample so that every
@@ -257,6 +273,24 @@ bool UFPSLagCompensationSubsystem::ResolveShot(const AFPSCharacter* Shooter,
 	}
 	Out.ResolvedFrame = ResolvedFrame;
 
+	FPSLagComp::FShotDebugSnapshot DebugShot;
+	bool bCaptureDebug = false;
+#if !UE_BUILD_SHIPPING
+	bCaptureDebug = bIsServer && CVarDrawShots.GetValueOnGameThread() > 0;
+#endif
+	if (bCaptureDebug)
+	{
+		DebugShot.ShooterIdentity = FString::Printf(TEXT("%s#%u"), *GetNameSafe(Shooter), Shooter ? Shooter->GetUniqueID() : 0);
+		DebugShot.Sequence = Request.Sequence;
+		DebugShot.BurstId = Request.BurstId;
+		DebugShot.RequestedFrame = Request.ClientFrame;
+		DebugShot.ResolvedFrame = ResolvedFrame;
+		DebugShot.NewestFrame = NewestRecordedFrame;
+		DebugShot.bClamped = Out.bFrameClamped;
+		DebugShot.Start = Start;
+		DebugShot.ExpiresAt = World->GetTimeSeconds() + FMath::Clamp(CVarShotSeconds.GetValueOnGameThread(), .1f, 10.f);
+	}
+
 	if (Out.bFrameClamped)
 	{
 		UE_LOG(LogFPSLagCompensation, Verbose,
@@ -297,6 +331,8 @@ bool UFPSLagCompensationSubsystem::ResolveShot(const AFPSCharacter* Shooter,
 	bool bHitCharacter = false;
 	AFPSCharacter* BestCharacter = nullptr;
 	FPSLagComp::FHitboxHit BestHit;
+	FPSLagComp::FShotDebugTarget BestDebugTarget;
+	int32 BestSampleFrame = INDEX_NONE;
 
 	for (TActorIterator<AFPSCharacter> It(World); It; ++It)
 	{
@@ -334,6 +370,20 @@ bool UFPSLagCompensationSubsystem::ResolveShot(const AFPSCharacter* Shooter,
 		}
 
 		// Broadphase against the rewinded body capsule.
+		FPSLagComp::FShotDebugTarget DebugTarget;
+		const bool bCaptureTarget = bCaptureDebug && !AFPSRecordingTestGameMode::IsListenHostObserver(Other);
+		if (bCaptureTarget)
+		{
+			DebugTarget.Identity = FString::Printf(TEXT("%s#%u"), *Other->GetName(), Other->GetUniqueID());
+			DebugTarget.BirthFrame = BirthFrame;
+			DebugTarget.bHistorical = Out.bHaveHistory && bHaveSample;
+			DebugTarget.QueryPose = Sample;
+			FPSLagComp::SampleCharacter(Other, DebugTarget.CurrentPose);
+			DebugTarget.CurrentPose.Frame = GetServerFrame();
+			if (DebugShot.Targets.Num() < 32) DebugShot.Targets.Add(DebugTarget);
+			else ++DebugShot.OmittedTargets;
+		}
+
 		float CapsuleDistance = 0.f;
 		if (!FPSLagComp::RayCapsule(Start, Direction, Sample.CapsuleA, Sample.CapsuleB,
 			Sample.CapsuleRadius, BestDistance, CapsuleDistance))
@@ -351,6 +401,8 @@ bool UFPSLagCompensationSubsystem::ResolveShot(const AFPSCharacter* Shooter,
 		BestDistance = Hit.Distance;
 		BestCharacter = Other;
 		BestHit = Hit;
+		BestSampleFrame = Out.bHaveHistory ? Sample.Frame : INDEX_NONE;
+		if (bCaptureDebug) BestDebugTarget = DebugTarget;
 	}
 
 	// Only a character closer than the wall counts; otherwise the shot is
@@ -365,9 +417,103 @@ bool UFPSLagCompensationSubsystem::ResolveShot(const AFPSCharacter* Shooter,
 		Out.Distance = BestHit.Distance;
 		Out.Location = BestHit.Location;
 		Out.Normal = -Direction;
+		Out.HitSampleFrame = BestSampleFrame;
 	}
 
+	if (bCaptureDebug)
+	{
+		// Always retain the actual hit target even if a crowded scene exceeded the visual cap.
+		if (Out.bHit && !BestDebugTarget.Identity.IsEmpty() && !DebugShot.Targets.ContainsByPredicate([&](const FPSLagComp::FShotDebugTarget& T) { return T.Identity == BestDebugTarget.Identity; }))
+		{
+			if (DebugShot.Targets.Num() == 32) DebugShot.Targets.Pop(EAllowShrinking::No);
+			DebugShot.Targets.Add(BestDebugTarget);
+		}
+		DebugShot.bHit = Out.bHit;
+		DebugShot.bWorldHit = Out.bBlockedByWorld;
+		DebugShot.HitBone = Out.Bone;
+		DebugShot.End = Out.Location;
+		if (ShotDebugSnapshots.Num() >= 8) ShotDebugSnapshots.RemoveAt(0, ShotDebugSnapshots.Num() - 7, EAllowShrinking::No);
+		ShotDebugSnapshots.Add(MoveTemp(DebugShot));
+	}
+	if (CVarLagCompDebug.GetValueOnGameThread() > 0)
+		UE_LOG(LogFPSLagCompensation, Log, TEXT("[FPSShotQuery] shooter=%s seq=%d burst=%u request=%d resolved=%d hitSample=%d newest=%d history=%d clamped=%d queryHit=%d world=%d bone=%s"),
+			*GetNameSafe(Shooter), Request.Sequence, Request.BurstId, Out.RequestedFrame, Out.ResolvedFrame,
+			Out.HitSampleFrame, NewestRecordedFrame, Out.bHaveHistory, Out.bFrameClamped, Out.bHit, Out.bBlockedByWorld, *Out.Bone.ToString());
 	return true;
+}
+
+namespace
+{
+	void DrawShotPose(UWorld* World, const FPSLagComp::FSampleFrame& Pose, const FColor& Color)
+	{
+#if ENABLE_DRAW_DEBUG && !UE_BUILD_SHIPPING
+		if (!Pose.bValid) return;
+		const TArray<FName>& Bones = FPSLagComp::GetRecordedBones();
+		bool bAnyBone = false;
+		for (int32 Bone = 0; Bone < Pose.BoneCount; ++Bone) bAnyBone |= Pose.BoneValid[Bone];
+		for (const FPSLagComp::FHitboxDef& Def : FPSLagComp::GetHitboxDefs())
+		{
+			const int32 A = Bones.IndexOfByKey(Def.Bone);
+			if (A < 0 || A >= Pose.BoneCount || !Pose.BoneValid[A]) continue;
+			const FVector Start = Pose.BoneTransforms[A].GetLocation();
+			if (Def.BoneEnd.IsNone())
+			{
+				DrawDebugSphere(World, Start, Def.Radius, 8, Color, false, 0.f, 0, .9f);
+				continue;
+			}
+			const int32 B = Bones.IndexOfByKey(Def.BoneEnd);
+			if (B < 0 || B >= Pose.BoneCount || !Pose.BoneValid[B]) continue;
+			const FVector End = Pose.BoneTransforms[B].GetLocation();
+			const FVector Axis = End - Start;
+			DrawDebugCapsule(World, (Start + End) * .5, Axis.Size() * .5 + Def.Radius, Def.Radius,
+				Axis.IsNearlyZero() ? FQuat::Identity : FRotationMatrix::MakeFromZ(Axis.GetSafeNormal()).ToQuat(),
+				Color, false, 0.f, 0, .9f);
+		}
+		if (!bAnyBone)
+		{
+			const FVector Axis = Pose.CapsuleB - Pose.CapsuleA;
+			DrawDebugCapsule(World, (Pose.CapsuleA + Pose.CapsuleB) * .5,
+				Axis.Size() * .5 + Pose.CapsuleRadius, Pose.CapsuleRadius,
+				Axis.IsNearlyZero() ? FQuat::Identity : FRotationMatrix::MakeFromZ(Axis.GetSafeNormal()).ToQuat(),
+				Color, false, 0.f, 0, .9f);
+		}
+#endif
+	}
+}
+
+void UFPSLagCompensationSubsystem::DrawShotSnapshots()
+{
+	UWorld* World = GetWorld();
+	if (!World || CVarDrawShots.GetValueOnGameThread() <= 0)
+	{
+		ShotDebugSnapshots.Reset();
+		return;
+	}
+	ShotDebugSnapshots.RemoveAll([World](const FPSLagComp::FShotDebugSnapshot& Shot) { return Shot.ExpiresAt <= World->GetTimeSeconds(); });
+#if ENABLE_DRAW_DEBUG && !UE_BUILD_SHIPPING
+	if (World->GetNetMode() == NM_DedicatedServer) return;
+	const int32 First = CVarDrawShots.GetValueOnGameThread() == 1 ? FMath::Max(0, ShotDebugSnapshots.Num() - 1) : 0;
+	for (int32 Index = First; Index < ShotDebugSnapshots.Num(); ++Index)
+	{
+		const FPSLagComp::FShotDebugSnapshot& Shot = ShotDebugSnapshots[Index];
+		DrawDebugLine(World, Shot.Start, Shot.End, FColor::Yellow, false, 0.f, 0, 1.5f);
+		DrawDebugPoint(World, Shot.End, 12.f, Shot.bHit ? FColor::Green : FColor::Orange, false, 0.f);
+		DrawDebugString(World, Shot.End + FVector(0, 0, 30), FString::Printf(
+			TEXT("%s seq=%d burst=%u QUERY %s bone=%s\nreq=%d resolved=%d newest=%d clamped=%d omitted=%d"),
+			*Shot.ShooterIdentity, Shot.Sequence, Shot.BurstId, Shot.bHit ? TEXT("HIT") : Shot.bWorldHit ? TEXT("WORLD") : TEXT("MISS"),
+			*Shot.HitBone.ToString(), Shot.RequestedFrame, Shot.ResolvedFrame, Shot.NewestFrame, Shot.bClamped, Shot.OmittedTargets), nullptr, FColor::Yellow, 0.f, true, .8f);
+		for (const FPSLagComp::FShotDebugTarget& Target : Shot.Targets)
+		{
+			DrawShotPose(World, Target.CurrentPose, FColor::Magenta);
+			DrawShotPose(World, Target.QueryPose, Target.bHistorical ? FColor::Green : FColor::Orange);
+			DrawDebugString(World, Target.QueryPose.CapsuleB + FVector(0, 0, 60), FString::Printf(
+				TEXT("%s lifeBirth=%d seq=%d burst=%u\n%s sample=%d currentAtQuery=%d"),
+				*Target.Identity, Target.BirthFrame, Shot.Sequence, Shot.BurstId,
+				Target.bHistorical ? TEXT("HISTORY") : TEXT("CURRENT FALLBACK"), Target.QueryPose.Frame, Target.CurrentPose.Frame),
+				nullptr, Target.bHistorical ? FColor::Green : FColor::Orange, 0.f, true, .8f);
+		}
+	}
+#endif
 }
 
 void UFPSLagCompensationSubsystem::DrawHistory(int32 FramesBack) const
@@ -390,7 +536,7 @@ void UFPSLagCompensationSubsystem::DrawHistory(int32 FramesBack) const
 	for (const auto& Pair : Histories)
 	{
 		const AFPSCharacter* Character = Pair.Key.Get();
-		if (!Character)
+		if (!Character || AFPSRecordingTestGameMode::IsListenHostObserver(Character))
 		{
 			continue;
 		}

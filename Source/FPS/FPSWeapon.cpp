@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FPSWeapon.h"
+#include "FPSRecordingTestGameMode.h"
 #include "FPSCharacter.h"
 #include "FPSCombatComponent.h"
 #include "Components/SceneComponent.h"
@@ -327,7 +328,7 @@ void AFPSWeapon::AttachToCharacter(ACharacter* Character, FName Socket1P, FName 
 	{
 		if (WeaponMesh1P->AttachToComponent(Mesh1P, FAttachmentTransformRules::SnapToTargetNotIncludingScale, EffectiveSocket1P))
 		{
-			WeaponMesh1P->SetHiddenInGame(false);
+			WeaponMesh1P->SetHiddenInGame(AFPSRecordingTestGameMode::IsListenHostObserver(Character));
 		}
 		else
 		{

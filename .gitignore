@@ -18,6 +18,7 @@
 Tools/LocalBuildConfig.json
 Config/DefaultEditorPerProjectUserSettings.ini
 # Personal study and application materials stay local
+*.mp4
 Source/Docs/
 **/*简历*
 **/*证件照*

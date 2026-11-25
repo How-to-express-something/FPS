@@ -11,6 +11,7 @@ class UInputMappingContext;
 class UInputAction;
 struct FInputActionValue;
 class UHUDWidget;
+class UNetworkDiagnosticsWidget;
 class ACameraActor;
 class AFPSCharacter;
 /**
@@ -70,6 +71,11 @@ protected:
 	TObjectPtr<UHUDWidget> HUDWidget;
 	
 private:
+	void UpdateNetworkDiagnostics();
+	UPROPERTY(EditDefaultsOnly, Category="HUD|Diagnostics") TSubclassOf<UNetworkDiagnosticsWidget> NetworkDiagnosticsWidgetClass;
+	UPROPERTY(Transient) TObjectPtr<UNetworkDiagnosticsWidget> NetworkDiagnosticsWidget;
+	TWeakObjectPtr<UWorld> NetworkDiagnosticsWorld;
+	bool bEndingPlay = false;
 	void UpdatePawnHUD();
 	void ClearDeathCamera();
 	UPROPERTY(Transient) TObjectPtr<ACameraActor> DeathCamera;

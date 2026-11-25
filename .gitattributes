@@ -7,3 +7,4 @@
 *.uasset binary
 *.umap binary
 *.wav binary
+*.gif binary
